@@ -1292,6 +1292,7 @@ class RigidSolver(Solver):
             tensor = _tensor.unsqueeze(0) if batched and self.n_envs and _tensor.ndim == 1 else _tensor
 
             if tensor.shape[-1] != len(inputs_idx):
+                print(tensor.shape, len(inputs_idx))
                 gs.raise_exception(f"Last dimension of the input tensor does not match length of `{idx_name}`.")
 
             if batched:
