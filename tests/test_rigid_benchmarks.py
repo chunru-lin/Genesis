@@ -215,7 +215,7 @@ def get_file_morph_options(**kwargs):
 
 
 @pytest.fixture(scope="session")
-def stream_writers(backend, printer_session):
+def stream_writers(printer_session):
     report_path = Path(REPORT_FILE)
 
     # Delete old unrelated worker-specific reports
@@ -245,8 +245,12 @@ def stream_writers(backend, printer_session):
 def factory_logger(stream_writers):
     class Logger:
         def __init__(self, hparams: dict[str, Any]):
-            self.hparams = {**hparams, "dtype": "ndarray" if gs.use_ndarray else "field"}
-            self.benchmark_id = "-".join((BENCHMARK_NAME, pprint_oneline(hparams, delimiter="-")))
+            self.hparams = {
+                **hparams,
+                "dtype": "ndarray" if gs.use_ndarray else "field",
+                "backend": str(gs.backend.name),
+            }
+            self.benchmark_id = "-".join((BENCHMARK_NAME, pprint_oneline(self.hparams, delimiter="-")))
 
             self.logger = None
             self.wandb_run = None
@@ -283,7 +287,6 @@ def factory_logger(stream_writers):
                         "machine_uuid": machine_uuid,
                         "hardware": hardware_fringerprint,
                         "platform": platform_fringerprint,
-                        "backend": str(gs.backend.name),
                         "benchmark_id": self.benchmark_id,
                         **self.hparams,
                     },
@@ -322,58 +325,47 @@ def factory_logger(stream_writers):
 
 
 @pytest.fixture
-def anymal_c(solver, n_envs, gjk):
+def go2(solver, n_envs, gjk):
     scene = gs.Scene(
         rigid_options=gs.options.RigidOptions(
             **get_rigid_solver_options(
                 dt=STEP_DT,
-                enable_self_collision=False,
                 **(dict(constraint_solver=solver) if solver is not None else {}),
-                **(dict(use_gjk_collision=gjk) if solver is not None else {}),
+                **(dict(use_gjk_collision=gjk) if gjk is not None else {}),
             )
-        ),
-        viewer_options=gs.options.ViewerOptions(
-            camera_pos=(3.5, 0.0, 2.5),
-            camera_lookat=(0.0, 0.0, 0.5),
-            camera_fov=40,
         ),
         show_viewer=False,
         show_FPS=False,
     )
 
-    scene.add_entity(gs.morphs.Plane())
+    scene.add_entity(
+        gs.morphs.Plane(),
+    )
     robot = scene.add_entity(
-        gs.morphs.URDF(
-            **get_file_morph_options(
-                file="urdf/anymal_c/urdf/anymal_c.urdf",
-                pos=(0, 0, 0.8),
-            )
-        ),
+        gs.morphs.URDF(file="urdf/go2/urdf/go2.urdf"),
+        vis_mode="collision",
     )
     time_start = time.time()
     scene.build(n_envs=n_envs)
     compile_time = time.time() - time_start
 
-    joints_name = (
-        "RH_HAA",
-        "LH_HAA",
-        "RF_HAA",
-        "LF_HAA",
-        "RH_HFE",
-        "LH_HFE",
-        "RF_HFE",
-        "LF_HFE",
-        "RH_KFE",
-        "LH_KFE",
-        "RF_KFE",
-        "LF_KFE",
+    ctrl_pos = torch.tensor(
+        [0.0, 0.0, 0.0, 0.0, 0.8, 0.8, 1.0, 1.0, -1.5, -1.5, -1.5, -1.5],
+        dtype=gs.tc_float,
+        device=gs.device,
     )
-    motors_dof_idx = [robot.get_joint(name).dof_start for name in joints_name]
-    robot.set_dofs_kp(np.full(12, 1000), motors_dof_idx)
-    if n_envs > 0:
-        robot.control_dofs_position(np.zeros((n_envs, 12)), motors_dof_idx)
-    else:
-        robot.control_dofs_position(np.zeros(12), motors_dof_idx)
+    robot.control_dofs_position(ctrl_pos, dofs_idx_local=slice(6, None))
+
+    init_qpos = torch.tensor(
+        [[0.0, 0.0, 0.42, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.8, 0.8, 1.0, 1.0, -1.5, -1.5, -1.5, -1.5]],
+        dtype=gs.tc_float,
+        device=gs.device,
+    ).repeat((scene.n_envs, 1))
+    dofs_lower_bound, dofs_upper_bound = robot.get_dofs_limit()
+    init_qpos[:, 7:] = dofs_lower_bound[6:] + (dofs_upper_bound[6:] - dofs_lower_bound[6:]) * torch.rand(
+        (scene.n_envs, robot.n_dofs - 6), dtype=gs.tc_float, device=gs.device
+    )
+    robot.set_qpos(init_qpos)
 
     num_steps = 0
     is_recording = False
@@ -395,37 +387,35 @@ def anymal_c(solver, n_envs, gjk):
 
 
 @pytest.fixture
-def batched_franka(solver, n_envs, gjk):
+def anymal_c(solver, n_envs, gjk):
     scene = gs.Scene(
         rigid_options=gs.options.RigidOptions(
             **get_rigid_solver_options(
                 dt=STEP_DT,
-                enable_self_collision=False,
                 **(dict(constraint_solver=solver) if solver is not None else {}),
-                **(dict(use_gjk_collision=gjk) if solver is not None else {}),
+                **(dict(use_gjk_collision=gjk) if gjk is not None else {}),
             )
-        ),
-        viewer_options=gs.options.ViewerOptions(
-            camera_pos=(3.5, 0.0, 2.5),
-            camera_lookat=(0.0, 0.0, 0.5),
-            camera_fov=40,
         ),
         show_viewer=False,
         show_FPS=False,
     )
 
     scene.add_entity(gs.morphs.Plane())
-    scene.add_entity(
-        gs.morphs.MJCF(
+    robot = scene.add_entity(
+        gs.morphs.URDF(
             **get_file_morph_options(
-                file="xml/franka_emika_panda/panda.xml",
+                file="urdf/anymal_c/urdf/anymal_c.urdf",
+                pos=(0, 0, 0.8),
             )
         ),
-        visualize_contact=True,
     )
     time_start = time.time()
-    scene.build(n_envs=n_envs, env_spacing=(1.0, 1.0))
+    scene.build(n_envs=n_envs)
     compile_time = time.time() - time_start
+
+    motors_dof_idx = slice(6, None)
+    robot.set_dofs_kp(1000.0, motors_dof_idx)
+    robot.control_dofs_position(0.0, motors_dof_idx)
 
     num_steps = 0
     is_recording = False
@@ -444,6 +434,173 @@ def batched_franka(solver, n_envs, gjk):
     realtime_factor = runtime_fps * STEP_DT
 
     return {"compile_time": compile_time, "runtime_fps": runtime_fps, "realtime_factor": realtime_factor}
+
+
+def _franka(solver, n_envs, gjk, is_collision_free, accessors):
+    scene = gs.Scene(
+        rigid_options=gs.options.RigidOptions(
+            **get_rigid_solver_options(
+                dt=STEP_DT,
+                **(dict(constraint_solver=solver) if solver is not None else {}),
+                **(dict(use_gjk_collision=gjk) if gjk is not None else {}),
+            )
+        ),
+        show_viewer=False,
+        show_FPS=False,
+    )
+
+    scene.add_entity(gs.morphs.Plane())
+    franka = scene.add_entity(
+        gs.morphs.MJCF(
+            **get_file_morph_options(
+                file="xml/franka_emika_panda/panda.xml",
+            )
+        ),
+    )
+    time_start = time.time()
+    scene.build(n_envs=n_envs)
+    compile_time = time.time() - time_start
+
+    ctrl = torch.tensor([0, 0, 0, -1.0, 0, 1.0, 0, 0.02, 0.02], dtype=gs.tc_float, device=gs.device)
+    if n_envs > 0:
+        ctrl = torch.tile(ctrl, (n_envs, 1))
+    if is_collision_free:
+        franka.set_qpos(ctrl)
+        franka.control_dofs_position(ctrl)
+
+    vel0 = torch.zeros((franka.n_qs,), dtype=gs.tc_float, device=gs.device)
+    if n_envs > 0:
+        n_reset_envs = int(0.02 * n_envs)
+        reset_envs_idx = torch.randperm(n_envs)[:n_reset_envs]
+        vel0 = torch.tile(vel0, (n_reset_envs, 1))
+        qpos0 = ctrl[reset_envs_idx]
+    else:
+        reset_envs_idx = None
+        qpos0 = ctrl
+
+    dofs_stiffness = franka.get_dofs_stiffness()
+    dofs_damping = franka.get_dofs_damping()
+
+    num_steps = 0
+    is_recording = False
+    time_start = time.time()
+    while True:
+        scene.step()
+        if accessors:
+            franka.get_ang()
+            franka.get_vel()
+            franka.get_dofs_position()
+            franka.get_dofs_velocity()
+            franka.get_links_pos()
+            franka.get_links_quat()
+            franka.get_links_vel()
+            franka.get_contacts()
+            franka.control_dofs_position(ctrl)
+            franka.set_dofs_stiffness(dofs_stiffness)
+            franka.set_dofs_damping(dofs_damping)
+            franka.set_dofs_velocity(vel0, envs_idx=reset_envs_idx, skip_forward=True)
+            franka.set_qpos(qpos0, envs_idx=reset_envs_idx, zero_velocity=False, skip_forward=True)
+
+        time_elapsed = time.time() - time_start
+        if is_recording:
+            num_steps += 1
+            if time_elapsed > DURATION_RECORD:
+                break
+        elif time_elapsed > DURATION_WARMUP:
+            time_start = time.time()
+            is_recording = True
+    runtime_fps = int(num_steps * max(n_envs, 1) / time_elapsed)
+    realtime_factor = runtime_fps * STEP_DT
+
+    return {"compile_time": compile_time, "runtime_fps": runtime_fps, "realtime_factor": realtime_factor}
+
+
+@pytest.fixture
+def franka(solver, n_envs, gjk):
+    return _franka(solver, n_envs, gjk, is_collision_free=False, accessors=False)
+
+
+@pytest.fixture
+def franka_free(solver, n_envs, gjk):
+    return _franka(solver, n_envs, gjk, is_collision_free=True, accessors=False)
+
+
+@pytest.fixture
+def franka_accessors(solver, n_envs, gjk):
+    return _franka(solver, n_envs, gjk, is_collision_free=True, accessors=True)
+
+
+def _duck_in_box(solver, n_envs, gjk, hard):
+    scene = gs.Scene(
+        rigid_options=gs.options.RigidOptions(
+            **(dict(constraint_solver=solver) if solver is not None else {}),
+            **(dict(use_gjk_collision=gjk) if gjk is not None else {}),
+        ),
+        show_viewer=False,
+        show_FPS=False,
+    )
+    scene.add_entity(
+        gs.morphs.Mesh(
+            file="meshes/tank.obj",
+            scale=5.0,
+            pos=(0.0, 0.0, 0.0),
+            euler=(90, 0, 90),
+            fixed=True,
+        ),
+        vis_mode="collision",
+    )
+    if hard:
+        mesh_kwargs = dict(
+            pos=(0.0, 0.0, 0.035),
+        )
+    else:
+        mesh_kwargs = dict(
+            pos=(0.1, 0.1, 0.035),
+            decompose_object_error_threshold=float("inf"),
+        )
+    duck = scene.add_entity(
+        morph=gs.morphs.Mesh(
+            file="meshes/duck.obj",
+            scale=0.04,
+            euler=(90, 0, 90),
+            **mesh_kwargs,
+        ),
+    )
+
+    time_start = time.time()
+    scene.build(n_envs=n_envs)
+    compile_time = time.time() - time_start
+
+    if n_envs > 0:
+        duck.set_dofs_velocity(0.5 * torch.rand((n_envs, 6), dtype=gs.tc_float, device=gs.device))
+
+    num_steps = 0
+    is_recording = False
+    time_start = time.time()
+    while True:
+        scene.step()
+        time_elapsed = time.time() - time_start
+        if is_recording:
+            num_steps += 1
+            if time_elapsed > DURATION_RECORD:
+                break
+        elif time_elapsed > DURATION_WARMUP:
+            time_start = time.time()
+            is_recording = True
+    runtime_fps = int(num_steps * max(n_envs, 1) / time_elapsed)
+    realtime_factor = runtime_fps * STEP_DT
+
+    return {"compile_time": compile_time, "runtime_fps": runtime_fps, "realtime_factor": realtime_factor}
+
+
+@pytest.fixture
+def duck_in_box_easy(solver, n_envs, gjk):
+    return _duck_in_box(solver, n_envs, gjk, hard=False)
+
+
+@pytest.fixture
+def duck_in_box_hard(solver, n_envs, gjk):
+    return _duck_in_box(solver, n_envs, gjk, hard=True)
 
 
 @pytest.fixture
@@ -452,15 +609,9 @@ def random(solver, n_envs, gjk):
         rigid_options=gs.options.RigidOptions(
             **get_rigid_solver_options(
                 dt=STEP_DT,
-                enable_self_collision=False,
                 **(dict(constraint_solver=solver) if solver is not None else {}),
-                **(dict(use_gjk_collision=gjk) if solver is not None else {}),
+                **(dict(use_gjk_collision=gjk) if gjk is not None else {}),
             )
-        ),
-        viewer_options=gs.options.ViewerOptions(
-            camera_pos=(3.5, 0.0, 2.5),
-            camera_lookat=(0.0, 0.0, 0.5),
-            camera_fov=40,
         ),
         show_viewer=False,
         show_FPS=False,
@@ -474,24 +625,24 @@ def random(solver, n_envs, gjk):
                 pos=(0, 0, 0.8),
             )
         ),
-        visualize_contact=True,
     )
     time_start = time.time()
-    scene.build(n_envs=n_envs, env_spacing=(1.0, 1.0))
+    scene.build(n_envs=n_envs)
     compile_time = time.time() - time_start
 
-    robot.set_dofs_kp(np.full((12,), fill_value=1000.0), np.arange(6, 18))
-    dofs = torch.arange(6, 18, device=gs.device)
-    robot.control_dofs_position(torch.zeros((n_envs, 12), device=gs.device), dofs)
+    motors_dof_idx = slice(6, None)
+    robot.set_dofs_kp(1000.0, motors_dof_idx)
+    robot.control_dofs_position(0.0, motors_dof_idx)
 
     num_steps = 0
     is_recording = False
     time_start = time.time()
     while True:
         robot.control_dofs_position(
-            torch.as_tensor(np.random.rand(n_envs, 12), dtype=gs.tc_float, device=gs.device) * 0.1 - 0.05, dofs
+            torch.rand((n_envs, 12), dtype=gs.tc_float, device=gs.device) * 0.1 - 0.05, motors_dof_idx
         )
         scene.step()
+
         time_elapsed = time.time() - time_start
         if is_recording:
             num_steps += 1
@@ -506,75 +657,18 @@ def random(solver, n_envs, gjk):
     return {"compile_time": compile_time, "runtime_fps": runtime_fps, "realtime_factor": realtime_factor}
 
 
-@pytest.fixture
-def cubes(solver, n_envs, n_cubes, enable_island, gjk):
+def _box_pyramid(solver, n_envs, gjk, n_cubes):
     scene = gs.Scene(
         rigid_options=gs.options.RigidOptions(
             **get_rigid_solver_options(
                 dt=STEP_DT,
-                use_contact_island=enable_island,
                 **(dict(constraint_solver=solver) if solver is not None else {}),
-                **(dict(use_gjk_collision=gjk) if solver is not None else {}),
+                **(dict(use_gjk_collision=gjk) if gjk is not None else {}),
             )
         ),
         viewer_options=gs.options.ViewerOptions(
-            camera_pos=(3.5, 0.0, 2.5),
+            camera_pos=(0.0, -3.5, 2.5),
             camera_lookat=(0.0, 0.0, 0.5),
-            camera_fov=40,
-        ),
-        show_viewer=False,
-        show_FPS=False,
-    )
-
-    scene.add_entity(gs.morphs.Plane())
-    for i in range(n_cubes):
-        scene.add_entity(
-            gs.morphs.Box(
-                size=(0.1, 0.1, 0.1),
-                pos=(0.0, 0.2 * i, 0.045),
-            ),
-        )
-    time_start = time.time()
-    scene.build(n_envs=n_envs)
-    compile_time = time.time() - time_start
-
-    num_steps = 0
-    is_recording = False
-    time_start = time.time()
-    while True:
-        scene.step()
-        time_elapsed = time.time() - time_start
-        if is_recording:
-            num_steps += 1
-            if time_elapsed > DURATION_RECORD:
-                break
-        elif time_elapsed > DURATION_WARMUP:
-            time_start = time.time()
-            is_recording = True
-    runtime_fps = int(num_steps * max(n_envs, 1) / time_elapsed)
-    realtime_factor = runtime_fps * STEP_DT
-
-    return {"compile_time": compile_time, "runtime_fps": runtime_fps, "realtime_factor": realtime_factor}
-
-
-@pytest.fixture
-def box_pyramid(solver, n_envs, n_cubes, enable_island, gjk, enable_mujoco_compatibility):
-    x_pos = 0.0
-
-    scene = gs.Scene(
-        rigid_options=gs.options.RigidOptions(
-            **get_rigid_solver_options(
-                dt=STEP_DT,
-                use_contact_island=enable_island,
-                box_box_detection=False,
-                enable_mujoco_compatibility=enable_mujoco_compatibility,
-                **(dict(constraint_solver=solver) if solver is not None else {}),
-                **(dict(use_gjk_collision=gjk) if solver is not None else {}),
-            )
-        ),
-        viewer_options=gs.options.ViewerOptions(
-            camera_pos=(x_pos, -3.5, 2.5),
-            camera_lookat=(x_pos, 0.0, 0.5),
             camera_fov=30,
             max_FPS=60,
         ),
@@ -582,17 +676,15 @@ def box_pyramid(solver, n_envs, n_cubes, enable_island, gjk, enable_mujoco_compa
         show_FPS=False,
     )
 
-    scene.add_entity(gs.morphs.Plane(pos=(x_pos, 0, 0)))
-    # create pyramid of boxes
+    scene.add_entity(gs.morphs.Plane())
     box_size = 0.25
-    box_spacing = box_size
-    vec_one = np.array([1.0, 1.0, 1.0])
-    box_pos_offset = (x_pos - 0.5, 1, 0.0) + 0.5 * box_size * vec_one
+    box_spacing = (1.0 - 1e-3) * box_size
+    box_pos_offset = (-0.5, 1.0, 0.0) + 0.5 * np.array([box_size, box_size, box_size])
     for i in range(n_cubes):
         for j in range(n_cubes - i):
             scene.add_entity(
                 gs.morphs.Box(
-                    size=box_size * vec_one,
+                    size=[box_size, box_size, box_size],
                     pos=box_pos_offset + box_spacing * np.array([i + 0.5 * j, 0.0, j]),
                 ),
             )
@@ -601,6 +693,10 @@ def box_pyramid(solver, n_envs, n_cubes, enable_island, gjk, enable_mujoco_compa
     scene.build(n_envs=n_envs)
     compile_time = time.time() - time_start
 
+    if n_envs > 0:
+        for box in scene.entities[1:]:
+            box.set_dofs_velocity(0.04 * torch.rand((n_envs, 6), dtype=gs.tc_float, device=gs.device))
+
     num_steps = 0
     is_recording = False
     time_start = time.time()
@@ -620,23 +716,56 @@ def box_pyramid(solver, n_envs, n_cubes, enable_island, gjk, enable_mujoco_compa
     return {"compile_time": compile_time, "runtime_fps": runtime_fps, "realtime_factor": realtime_factor}
 
 
+@pytest.fixture
+def box_pyramid_3(solver, n_envs, gjk):
+    return _box_pyramid(solver, n_envs, gjk, n_cubes=3)
+
+
+@pytest.fixture
+def box_pyramid_4(solver, n_envs, gjk):
+    return _box_pyramid(solver, n_envs, gjk, n_cubes=4)
+
+
+@pytest.fixture
+def box_pyramid_5(solver, n_envs, gjk):
+    return _box_pyramid(solver, n_envs, gjk, n_cubes=5)
+
+
+@pytest.fixture
+def box_pyramid_6(solver, n_envs, gjk):
+    return _box_pyramid(solver, n_envs, gjk, n_cubes=6)
+
+
 @pytest.mark.parametrize(
-    "runnable, solver, gjk, n_envs",
+    "runnable, solver, gjk, n_envs, backend",
     [
-        ("anymal_c", gs.constraint_solver.CG, False, 30000),
-        ("batched_franka", gs.constraint_solver.CG, False, 30000),
-        ("anymal_c", gs.constraint_solver.Newton, False, 30000),
-        ("batched_franka", gs.constraint_solver.Newton, False, 30000),
-        ("anymal_c", gs.constraint_solver.CG, True, 30000),
-        ("batched_franka", gs.constraint_solver.CG, True, 30000),
-        ("anymal_c", gs.constraint_solver.Newton, True, 30000),
-        ("batched_franka", gs.constraint_solver.Newton, True, 30000),
-        ("random", None, None, 30000),
-        ("anymal_c", None, None, 0),
-        ("batched_franka", None, None, 0),
+        ("duck_in_box_easy", None, True, 30000, gs.gpu),
+        ("duck_in_box_easy", None, False, 30000, gs.gpu),
+        ("duck_in_box_hard", None, True, 30000, gs.gpu),
+        ("duck_in_box_hard", None, False, 30000, gs.gpu),
+        ("duck_in_box_hard", None, None, 0, gs.cpu),
+        ("anymal_c", None, None, 30000, gs.gpu),
+        ("anymal_c", None, None, 0, gs.cpu),
+        ("go2", None, True, 4096, gs.gpu),
+        ("go2", gs.constraint_solver.CG, False, 4096, gs.gpu),
+        ("go2", gs.constraint_solver.Newton, False, 4096, gs.gpu),
+        ("franka_accessors", None, None, 0, gs.cpu),
+        ("franka_accessors", None, None, 30000, gs.gpu),
+        ("franka_free", None, None, 30000, gs.gpu),
+        ("franka", None, False, 30000, gs.gpu),
+        ("franka", None, True, 30000, gs.gpu),
+        ("franka", gs.constraint_solver.CG, None, 30000, gs.gpu),
+        ("franka", gs.constraint_solver.Newton, None, 30000, gs.gpu),
+        ("franka", None, None, 0, gs.cpu),
+        ("random", None, None, 30000, gs.gpu),
+        ("box_pyramid_3", None, None, 4096, gs.gpu),
+        ("box_pyramid_4", None, None, 4096, gs.gpu),
+        ("box_pyramid_5", None, None, 4096, gs.gpu),
+        ("box_pyramid_6", None, True, 4096, gs.gpu),
+        ("box_pyramid_6", None, False, 4096, gs.gpu),
     ],
 )
-def test_speed(factory_logger, request, runnable, solver, n_envs, gjk):
+def test_speed(factory_logger, request, runnable, solver, gjk, n_envs):
     with factory_logger(
         {
             "env": runnable,
@@ -647,52 +776,3 @@ def test_speed(factory_logger, request, runnable, solver, n_envs, gjk):
         }
     ) as logger:
         logger.write(request.getfixturevalue(runnable))
-
-
-# TODO: Skipping constraint_solver_decomp_island.py and migrate this file later.
-# Right now, island is kind of outdated, including those equality constraints.
-@pytest.mark.parametrize("solver", [gs.constraint_solver.CG, gs.constraint_solver.Newton])
-@pytest.mark.parametrize("n_cubes", [10])
-@pytest.mark.parametrize("enable_island", [False])  # [False, True])
-@pytest.mark.parametrize("n_envs", [8192])
-@pytest.mark.parametrize("gjk", [False, True])
-def test_cubes(factory_logger, request, n_cubes, solver, enable_island, n_envs, gjk):
-    with factory_logger(
-        {
-            "env": f"cube#{n_cubes}",
-            "dtype": "ndarray" if gs.use_ndarray else "field",
-            "batch_size": n_envs,
-            "constraint_solver": solver,
-            "use_contact_island": enable_island,
-            "gjk_collision": gjk,
-        }
-    ) as logger:
-        logger.write(request.getfixturevalue("cubes"))
-
-
-# FIXME:Increasing the batch size triggers CUDA out-of-memory error (Nvidia H100)
-# FIXME:Increasing # cubes triggers CUDA illegal memory access error for all collision methods (Nvidia RTX 5900)
-@pytest.mark.parametrize("solver", [gs.constraint_solver.Newton])
-@pytest.mark.parametrize("n_cubes", [5])
-@pytest.mark.parametrize("enable_island", [False])
-@pytest.mark.parametrize("n_envs", [2048])
-@pytest.mark.parametrize(
-    "gjk, enable_mujoco_compatibility",
-    [
-        (False, True),  # MPR
-        (False, False),  # MPR+SDF
-        (True, False),  # GJK
-    ],
-)
-def test_box_pyramid(factory_logger, request, n_cubes, solver, enable_island, n_envs, gjk, enable_mujoco_compatibility):
-    with factory_logger(
-        {
-            "env": f"box_pyramid#{n_cubes}",
-            "batch_size": n_envs,
-            "constraint_solver": solver,
-            "use_contact_island": enable_island,
-            "gjk_collision": gjk,
-            "enable_mujoco_compatibility": enable_mujoco_compatibility,
-        }
-    ) as logger:
-        logger.write(request.getfixturevalue("box_pyramid"))

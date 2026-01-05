@@ -317,7 +317,7 @@ class RigidOptions(Options):
     iterations : int, optional
         Number of iterations for the constraint solver. Defaults to 50.
     tolerance : float, optional
-        Tolerance for the constraint solver. Defaults to 1e-8.
+        Tolerance for the constraint solver. Defaults to 1e-6.
     ls_iterations : int, optional
         Number of line search iterations for the constraint solver. Defaults to 50.
     ls_tolerance : float, optional
@@ -349,7 +349,8 @@ class RigidOptions(Options):
     max_dynamic_constraints : int, optional
         Maximum number of dynamic constraints (like suction cup). Defaults to 8.
     use_gjk_collision: bool, optional
-        Whether to use GJK for collision detection instead of MPR. Defaults to True.
+        Whether to use GJK for collision detection instead of MPR. More stable but much slower. Defaults to
+        `sim_options.requires_grad`.
 
     Warning
     -------
@@ -363,7 +364,8 @@ class RigidOptions(Options):
     enable_self_collision: bool = True
     enable_adjacent_collision: bool = False
     disable_constraint: bool = False
-    max_collision_pairs: int = 300
+    max_collision_pairs: int = 150
+    multiplier_collision_broad_phase: int = 8
     integrator: gs.integrator = gs.integrator.approximate_implicitfast
     IK_max_targets: int = 6
 
@@ -375,7 +377,7 @@ class RigidOptions(Options):
     # constraint solver
     constraint_solver: gs.constraint_solver = gs.constraint_solver.Newton
     iterations: int = 50
-    tolerance: float = 1e-8
+    tolerance: float = 1e-6
     ls_iterations: int = 50
     ls_tolerance: float = 1e-2
     noslip_iterations: int = 0
@@ -384,7 +386,7 @@ class RigidOptions(Options):
     contact_resolve_time: Optional[float] = None
     constraint_timeconst: float = 0.01
     use_contact_island: bool = False
-    box_box_detection: Optional[bool] = None
+    box_box_detection: bool = False
 
     # hibernation threshold
     use_hibernation: bool = False
@@ -399,43 +401,10 @@ class RigidOptions(Options):
     enable_mujoco_compatibility: bool = False
 
     # GJK collision detection
-    use_gjk_collision: bool = True
+    use_gjk_collision: Optional[bool] = None
 
     def __init__(self, **data):
         super().__init__(**data)
-
-
-class AvatarOptions(Options):
-    """
-    Options configuring the AvatarSolver. AvatarEntity is similar to RigidEntity, but without internal physics.
-
-    Parameters
-    ----------
-    dt : float, optional
-        Time duration for each simulation step in seconds. If none, it will inherit from `SimOptions`. Defaults to None.
-    enable_collision : float, optional
-        Whether to enable collision detection. Defaults to False.
-    enable_self_collision : float, optional
-        Whether to enable self collision within each entity. Defaults to False.
-    enable_adjacent_collision : bool, optional
-        Whether to enable collision between successive parent-child body pairs within each entity. Defaults to False.
-    max_collision_pairs : int, optional
-        Maximum number of collision pairs. Defaults to 100.
-    IK_max_targets : int, optional
-        Maximum number of IK targets. Increasing this doesn't affect IK solving speed, but will increase memory usage. Defaults to 6.
-    max_dynamic_constraints : int, optional
-        Maximum number of dynamic constraints (like suction cup). Defaults to 8.
-    """
-
-    dt: Optional[float] = None
-    enable_collision: bool = False
-    enable_self_collision: bool = False
-    enable_adjacent_collision: bool = False
-    max_collision_pairs: int = 300
-    IK_max_targets: int = 6  # Increasing this doesn't affect IK solving speed, but will increase memory usage
-
-    # for dynamic properties
-    max_dynamic_constraints: int = 8
 
 
 class MPMOptions(Options):

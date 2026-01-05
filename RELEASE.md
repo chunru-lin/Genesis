@@ -1,5 +1,146 @@
 # Genesis Release Note
 
+## 0.3.11
+
+The main focus of this release is to improve scaling of the simulation wrt the complexity of the scene, and better leverage GPUn compute for small to moderate batch sizes (0<=n_envs<=8192). As usual, a bunch of minor bugs have been fixed.
+
+### New Features
+
+* Support specifying offset transform for camera sensor. (@YilingQiao) (#2126)
+* Enable zero-copy for fields on Metal if supported. (@duburcqa) (#2174)
+
+### Bug Fixes
+
+* Avoid discontinuities in smooth animations caused by singularities. (@Rush2k) (#2116)
+* Fix forward update logics. (@duburcqa) (#2122)
+* Fix kernel caching mechanism hindering performance. (@duburcqa) (#2123)
+* Fix support of old torch for 'set_dofs_velocity' when velocity=None. (@YilingQiao) (#2160)
+* Force rendering systematically when updating camera sensor. (@YilingQiao) (#2162)
+* Fix incorrect lighting when offscreen cameras based on rasterizer. (@duburcqa) (#2163)
+* Fix rasterizer race conditions when running in background thread. (@duburcqa) (#2169)
+* Fix broken exception handling when loading obj files with unsupported face type. (@Kashu7100) (#2170)
+* Fix 'pysplashsurf' memory leak causing OOM error. (@duburcqa) (#2173, #2176)
+* Diagnose out-of-bound SDF gradient index. (@duburcqa) (#2177)
+
+### Miscellaneous
+
+* Stop assessing warmstart vs smooth acc at constraint solver init. (@duburcqa) (#2117)
+* Speedup collision detection broad phase on GPU. (@duburcqa) (#2128)
+* More comprehensive benchmarks. (@duburcqa) (#2137)
+* Accelerate constraint solver first pass using shared memory. (@duburcqa) (#2136, #2140)
+* Further optimize cholesky solve using warp reduction and memory padding. (@duburcqa) (#2145, #2146)
+* Improve runtime speed by optimize memory layout of constraint solver. (@duburcqa) (#2147)
+* Fast mass matrix factorisation on GPU using shared memory. (@duburcqa) (#2154)
+* Optimize rigid body dynamics to scale better wrt dofs and entities. (@duburcqa) (#2161)
+* Fix spurious deprecated property warnings during introspection. (@duburcqa) (#2168)
+* Various solver refactoring to support GsTaichi Main. (@hughperkins, @duburcqa) (#2131, #2135, #2143, #2151)
+* Improve single-threaded cpu-based simulation runtime speed by upgrading gstaichi. (@hughperkins) (#2129, #2153)
+
+## 0.3.10
+
+Small release mainly fixing bugs.
+
+### Bug Fixes
+
+* Fix parsing for special material properties in glTF meshes (@duburcqa) (#2110)
+
+### Miscellaneous
+
+* More robust detection of invalid simulation state. (@duburcqa) (#2112)
+
+## 0.3.9
+
+Small release mainly polishing features that were introduced in previous release.
+
+### New Features
+
+* [CHANGING] Replace SDF fallback by GJK. (@duburcqa) (#2081)
+* [CHANGING] Improve inertial estimation if undefined. (@YilingQiao) (#2100)
+* Add support of boolean masking as index. (@duburcqa) (#2087)
+* Fix and improve merging of rigid entities. (@duburcqa) (#2098)
+
+### Bug Fixes
+
+* Fix increased memory usage due to differentiable simulation. (@duburcqa) (#2074)
+* Fix 'envs_idx' in motion planning. (@duburcqa) (#2093)
+* Fix 'DroneEntity.set_propellels_rpm'. (@duburcqa) (#2095)
+* Fix extended broadcasting. (@duburcqa) (#2096)
+* Fix 'RigidEntity.set_dofs_velocity'. (@robin271828) (#2102)
+* Fix joint stiffness not taking into account neutral position. (@YilingQiao) (#2105)
+* Fix explicit URDF material color being ignored. (@duburcqa) (#2107)
+
+### Miscellaneous
+
+* Speed up torch-based geom utils via 'torch.jit.script'. (@duburcqa) (#2075)
+* Improve scalability wrt number of contacts. (@duburcqa) (#2085, #2103)
+* Make Go2 RL env GPU-sync free. (@duburcqa) (#2092)
+
+## 0.3.8
+
+The performance of data accessors have been dramatically improved by leveraging zero-copy memory sharing between GsTaichi and Torch. Beyond that, the robustness of the default contact algorithm has been improved, and differentiable forward dynamics for Rigid Body simulation is not partially available. Last, but not least, GsTaichi dynamic array mode is finally enabled back by default!
+
+### New Features
+
+* [CHANGING] More robust MPR+SDF collision detection algorithm. (@duburcqa) (#1983, #1985)
+* [CHANGING] Disable box-box by default. (@duburcqa) (#1982)
+* Enable back GsTaichi dynamic array mode by default except for MacOS. (@duburcqa) (#1977)
+* Add error code to rigid solver. (@duburcqa) (#1979)
+* Add option to force batching of fixed vertices. (@duburcqa) (#1998)
+* Leverage GsTaichi zero-copy in data accessors. (@duburcqa) (#2011, #2019, #2021, #2023, #2025, #2030, #2037, #2048, #2054)
+* Add an option to disable keyboard shortcuts (@YilingQiao) (#2026)
+* Add support of 'capsule' primitive in URDF file. (@duburcqa) (#2045)
+* Add full support of tensor broadcasting in getters. (@duburcqa) (#2051)
+* Add rasterizer, batch renderer, and raytracer as sensor (@YilingQiao) (#2010)
+* Differentiable forward dynamics for rigid body sim. (@SonSang) (#1808, #2063, #2068)
+
+### Bug Fixes
+
+* Fix sensor IMU accelerometer signal. (@Milotrince) (#1962)
+* Fix 'RigidJoint.(get_anchor_pos | get_anchor_axis)' getters. (@alexis779) (#2012)
+* Prevent nan to propagate in position and raise exception. (@duburcqa) (#2033)
+* Fix camera following entity for 'fix_orientation=True'. (@duburcqa) (#2038)
+* Fix support of Hybrid entity with non-fixed base link. (@duburcqa) (#2040)
+* Raise exception if trying to load PointCloud as Mesh. (@duburcqa) (#2042)
+* Fix boolean mask inversion for PyTorch 2.x (@yoneken) (#2056)
+* Fix URDF color overwrite. (@duburcqa) (#2065)
+
+### Miscellaneous
+
+* Reduce memory footprint. (@duburcqa) (#2000, #2031)
+* Only enable GJK by default if gradient computation is required. (@duburcqa) (#1984)
+* Bump GsTaichi Support Nvidia GPU Blackwell. (@johnnynunez) (#2002)
+* Add dependency version upper-bound 'tetgen< 0.7.0'. (@YilingQiao) (#2029)
+* Bump up min version requirement for Torch after introducing zero-copy. (@duburcqa) (#2034)
+* Add 'parse_glb_with_zup' option to all file-based Morph. (@ACMLCZH) (#1938)
+* Enable more example scripts in CI. (@duburcqa) (#2057)
+* Fix fast cache and zero-copy bugs. (@hughperkins) (#2050)
+
+## 0.3.7
+
+The performance of GsTaichi dynamic array mode has been greatly improved. Now it should be on par with fixed-size array mode (aka performance mode) for very large batch sizes, and up to 30% slower for non-batched simulations. This mode is still considered experimental and must be enabled manually by setting the env var 'GS_ENABLE_NDARRAY=1'. Just try it if you are tired of endlessly waiting for the simulation to compile!
+
+### New Features
+
+* Implement position-velocity controller. (@matthieuvigne) (#1948)
+
+### Bug Fixes
+
+* Fix missing option `diffuse_texture` to `Glass` surface. (@Kashu7100) (#1934)
+* Fix interactive viewer. (@YilingQiao) (#1931)
+* Fix external coupling forces from other solvers not affecting rigid bodies. (@SonSang) (#1941)
+* Fix silent process killing issue in MPM simulation by raising an exception. (@SonSang) (#1949)
+* Fix 'discrete_obstacles_terrain' being completely flat. (@jgillick) (#1972)
+
+### Miscellaneous
+
+* Added warning message about stable timestep for SPH solver. (@SonSang) (#1925)
+* Reduce memory usage due to diff constraint solver. (@YilingQiao) (#1930)
+* Faster non-batched simulation. (@duburcqa) (#1935)
+* Fix or silent dev warnings. (@duburcqa) (#1944)
+* Add caching to Rigid Link state getters to improve performance. (@duburcqa) (#1940, #1955)
+* Add support of Linux ARM. (@duburcqa) (#1961)
+* Add 'GS_PARA_LEVEL' env var to force kernel parallelization level. (@duburcqa) (#1968)
+
 ## 0.3.6
 
 A new experimental interface with the Incremental Potential Contact coupling solver [libuipc](https://github.com/spiriMirror/libuipc) has been introduced, mainly targeting cloth simulation.

@@ -11,12 +11,15 @@ from datetime import datetime
 from functools import cache
 from itertools import chain
 from pathlib import Path
+from types import GeneratorType
 from typing import Literal, Sequence
 
 import cpuinfo
 import numpy as np
 import mujoco
 import torch
+from httpx import HTTPError as HTTPXError
+from httpcore import TimeoutException as HTTPTimeoutException
 from huggingface_hub import snapshot_download
 from PIL import Image, UnidentifiedImageError
 from requests.exceptions import HTTPError
@@ -32,8 +35,8 @@ from genesis.options.morphs import URDF_FORMAT, MJCF_FORMAT, MESH_FORMATS, GLTF_
 REPOSITY_URL = "Genesis-Embodied-AI/Genesis"
 DEFAULT_BRANCH_NAME = "main"
 
-HUGGINGFACE_ASSETS_REVISION = "16e4eae0024312b84518f4b555dd630d6b34095a"
-HUGGINGFACE_SNAPSHOT_REVISION = "bfd02a635579cbd5aefa7027df54a433f8ad1915"
+HUGGINGFACE_ASSETS_REVISION = "701f78c1465f0a98f6540bae6c9daacaa551b7bf"
+HUGGINGFACE_SNAPSHOT_REVISION = "ea6ae70386c2b2fbae1387f93ba0e4de1ed7abf7"
 
 MESH_EXTENSIONS = (".mtl", *MESH_FORMATS, *GLTF_FORMATS, *USD_FORMATS)
 IMAGE_EXTENSIONS = (".png", ".jpg")
@@ -54,7 +57,7 @@ def get_hardware_fingerprint(include_gpu=True):
     # CPU info
     cpu_info = cpuinfo.get_cpu_info()
     infos = [
-        cpu_info.get("brand_raw", cpu_info.get("hardware_raw")),
+        next(filter(None, map(cpu_info.get, ("brand_raw", "hardware_raw", "vendor_id_raw")))),
         cpu_info.get("arch"),
     ]
 
@@ -236,7 +239,7 @@ def get_hf_dataset(
 
             if not has_files:
                 raise HTTPError("No file downloaded.")
-        except (HTTPError, FileNotFoundError):
+        except (HTTPTimeoutException, HTTPXError, HTTPError, FileNotFoundError, RuntimeError):
             if i == num_retry - 1:
                 raise
             print(f"Failed to download assets from HuggingFace dataset. Trying again in {retry_delay}s...")
@@ -261,6 +264,8 @@ def assert_allclose(actual, desired, *, atol=None, rtol=None, tol=None, err_msg=
     # Convert input arguments as numpy arrays
     args = [actual, desired]
     for i, arg in enumerate(args):
+        if isinstance(arg, (GeneratorType, map)):
+            arg = tuple(arg)
         if isinstance(arg, (tuple, list)):
             arg = np.stack([tensor_to_array(val) for val in arg], axis=0)
         args[i] = tensor_to_array(arg)
@@ -273,8 +278,11 @@ def assert_allclose(actual, desired, *, atol=None, rtol=None, tol=None, err_msg=
     # First, try to broadcast both matrices. Then it is does not work, squeeze them before trying again.
     try:
         args = np.broadcast_arrays(*args)
-    except ValueError:
-        args = np.broadcast_arrays(*map(np.squeeze, args))
+    except ValueError as e:
+        try:
+            args = np.broadcast_arrays(*map(np.squeeze, args))
+        except ValueError:
+            raise e
 
     np.testing.assert_allclose(*args, atol=atol, rtol=rtol, err_msg=err_msg)
 
@@ -294,7 +302,7 @@ def init_simulators(gs_sim, mj_sim=None, qpos=None, qvel=None):
         gs_robot.set_qpos(qpos)
     if qvel is not None:
         gs_robot.set_dofs_velocity(qvel)
-    # TODO: This should be moved in `set_state`, `set_qpos`, `set_dofs_position`, `set_dofs_velocity`
+
     gs_sim.rigid_solver.dofs_state.qf_constraint.fill(0.0)
     gs_sim.rigid_solver._func_forward_dynamics()
     gs_sim.rigid_solver._func_constraint_force()
@@ -1027,8 +1035,8 @@ def simulate_and_check_mujoco_consistency(gs_sim, mj_sim, qpos=None, qvel=None, 
         #     gs_sim.scene.visualizer.update()
 
 
-def rgb_array_to_png_bytes(rgb_arr: np.ndarray) -> bytes:
-    img = Image.fromarray(rgb_arr)
+def rgb_array_to_png_bytes(rgb_arr: np.ndarray | torch.Tensor) -> bytes:
+    img = Image.fromarray(tensor_to_array(rgb_arr))
     buffer = io.BytesIO()
     img.save(buffer, format="PNG")
     return buffer.getvalue()

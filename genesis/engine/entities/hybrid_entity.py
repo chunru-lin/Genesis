@@ -66,7 +66,6 @@ class HybridEntity(Entity):
 
         if isinstance(morph, gs.morphs.URDF):
             # set up rigid part
-            morph.fixed = material.fixed  # NOTE: use hybrid material to determine this
             if material.use_default_coupling:
                 gs.logger.info("Use default coupling in hybrid. Overwrite `needs_coup` in rigid material to True")
                 material_rigid._needs_coup = True
@@ -84,10 +83,9 @@ class HybridEntity(Entity):
             augment_link_world_coords(part_rigid)
 
             # set soft parts based on rigid links
-            if material._func_instantiate_soft_from_rigid is None:
-                func_instantiate_soft_from_rigid = default_func_instantiate_soft_from_rigid
-            else:
-                func_instantiate_soft_from_rigid = material._func_instantiate_soft_from_rigid
+            func_instantiate_soft_from_rigid = (
+                material._func_instantiate_soft_from_rigid or default_func_instantiate_soft_from_rigid
+            )
             part_soft = func_instantiate_soft_from_rigid(
                 scene=scene,
                 part_rigid=part_rigid,
@@ -309,6 +307,22 @@ class HybridEntity(Entity):
         """
         return self._part_rigid.control_dofs_position(*args, **kwargs)
 
+    def control_dofs_position_velocity(self, *args, **kwargs):
+        """
+        Apply position control to the rigid part of the hybrid entity.
+
+        Parameters
+        ----------
+        *args, **kwargs
+            Passed directly to the rigid entity's control_dofs_position method.
+
+        Returns
+        -------
+        gs.Tensor
+            Control output for position adjustment of the rigid body's DOFs.
+        """
+        return self._part_rigid.control_dofs_position_velocity(*args, **kwargs)
+
     def control_dofs_velocity(self, *args, **kwargs):
         """
         Apply velocity control to the rigid part of the hybrid entity.
@@ -438,8 +452,8 @@ class HybridEntity(Entity):
                 acc = vel_d / dt_for_rigid_acc
                 frc_vel = mass_real * acc
                 frc_ang = (x_pos - links_state.root_COM[link_idx, i_b]).cross(frc_vel)
-                links_state.cfrc_applied_vel[link_idx, i_b] += frc_vel
-                links_state.cfrc_applied_ang[link_idx, i_b] += frc_ang
+                links_state.cfrc_coupling_vel[link_idx, i_b] += frc_vel
+                links_state.cfrc_coupling_ang[link_idx, i_b] += frc_ang
 
                 # rigid-to-soft coupling # NOTE: this may lead to unstable feedback loop
                 self._solver_soft.particles.vel[f_, i_global, i_b] += vel_d * self.material.soft_dv_coef

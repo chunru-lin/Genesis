@@ -1,3 +1,4 @@
+import math
 from unittest.mock import patch
 
 import pytest
@@ -6,9 +7,11 @@ import numpy as np
 
 import genesis as gs
 import genesis.utils.geom as gu
+from genesis.utils.tools import FPSTracker
 from genesis.utils.misc import tensor_to_array
 from genesis.utils import warnings as warnings_mod
 from genesis.utils.warnings import warn_once
+from genesis.utils.urdf import compose_inertial_properties
 
 from .utils import assert_allclose
 
@@ -57,7 +60,7 @@ def test_warn_once_with_empty_message(clear_seen_fixture):
             mock_warning.assert_called_once_with("")
 
 
-def _ti_kernel_wrapper(ti_func, num_inputs, num_outputs):
+def _ti_kernel_wrapper(ti_func, num_inputs, num_outputs, *args):
     import gstaichi as ti
 
     if num_inputs == 1 and num_outputs == 1:
@@ -66,7 +69,7 @@ def _ti_kernel_wrapper(ti_func, num_inputs, num_outputs):
         def kernel(ti_in: ti.template(), ti_out: ti.template()):
             ti.loop_config(serialize=False)
             for I in ti.grouped(ti.ndrange(*ti_in.shape)):
-                ti_out[I] = ti_func(ti_in[I])
+                ti_out[I] = ti_func(ti_in[I], *args)
 
     elif num_inputs == 2 and num_outputs == 1:
 
@@ -74,7 +77,7 @@ def _ti_kernel_wrapper(ti_func, num_inputs, num_outputs):
         def kernel(ti_in_1: ti.template(), ti_in_2: ti.template(), ti_out: ti.template()):
             ti.loop_config(serialize=False)
             for I in ti.grouped(ti.ndrange(*ti_in_1.shape)):
-                ti_out[I] = ti_func(ti_in_1[I], ti_in_2[I])
+                ti_out[I] = ti_func(ti_in_1[I], ti_in_2[I], *args)
 
     elif num_inputs == 3 and num_outputs == 1:
 
@@ -82,7 +85,7 @@ def _ti_kernel_wrapper(ti_func, num_inputs, num_outputs):
         def kernel(ti_in_1: ti.template(), ti_in_2: ti.template(), ti_in_3: ti.template(), ti_out: ti.template()):
             ti.loop_config(serialize=False)
             for I in ti.grouped(ti.ndrange(*ti_in_1.shape)):
-                ti_out[I] = ti_func(ti_in_1[I], ti_in_2[I], ti_in_3[I])
+                ti_out[I] = ti_func(ti_in_1[I], ti_in_2[I], ti_in_3[I], *args)
 
     elif num_inputs == 4 and num_outputs == 2:
 
@@ -97,7 +100,7 @@ def _ti_kernel_wrapper(ti_func, num_inputs, num_outputs):
         ):
             ti.loop_config(serialize=False)
             for I in ti.grouped(ti.ndrange(*ti_in_1.shape)):
-                ti_out_1[I], ti_out_2[I] = ti_func(ti_in_1[I], ti_in_2[I], ti_in_3[I], ti_in_4[I])
+                ti_out_1[I], ti_out_2[I] = ti_func(ti_in_1[I], ti_in_2[I], ti_in_3[I], ti_in_4[I], *args)
 
     else:
         raise NotImplementedError(f"Taichi func with arity in={num_inputs},out={num_outputs} not supported")
@@ -105,16 +108,17 @@ def _ti_kernel_wrapper(ti_func, num_inputs, num_outputs):
     return kernel
 
 
+@pytest.mark.slow  # ~110s
 @pytest.mark.required
 @pytest.mark.parametrize("batch_shape", [(10, 40, 25), ()])
 def test_utils_geom_taichi_vs_tensor_consistency(batch_shape):
     import gstaichi as ti
 
-    for ti_func, py_func, shapes_in, shapes_out in (
+    for ti_func, py_func, shapes_in, shapes_out, *args in (
         (gu.ti_xyz_to_quat, gu.xyz_to_quat, [[3]], [[4]]),
-        (gu.ti_quat_to_R, gu.quat_to_R, [[4]], [[3, 3]]),
-        (gu.ti_quat_to_xyz, gu.quat_to_xyz, [[4]], [[3]]),
-        (gu.ti_trans_quat_to_T, gu.trans_quat_to_T, [[3], [4]], [[4, 4]]),
+        (gu.ti_quat_to_R, gu.quat_to_R, [[4]], [[3, 3]], gs.EPS),
+        (gu.ti_quat_to_xyz, gu.quat_to_xyz, [[4]], [[3]], gs.EPS),
+        (gu.ti_trans_quat_to_T, gu.trans_quat_to_T, [[3], [4]], [[4, 4]], gs.EPS),
         (gu.ti_transform_quat_by_quat, gu.transform_quat_by_quat, [[4], [4]], [[4]]),
         (gu.ti_transform_by_quat, gu.transform_by_quat, [[3], [4]], [[3]]),
         (gu.ti_inv_transform_by_quat, gu.inv_transform_by_quat, [[3], [4]], [[3]]),
@@ -153,7 +157,7 @@ def test_utils_geom_taichi_vs_tensor_consistency(batch_shape):
             tc_outs = (tc_outs,)
         tc_outs = tuple(map(tensor_to_array, tc_outs))
 
-        kernel = _ti_kernel_wrapper(ti_func, num_inputs, num_outputs)
+        kernel = _ti_kernel_wrapper(ti_func, num_inputs, num_outputs, *args)
         kernel(*ti_args, *ti_outs)
 
         for np_out, tc_out, ti_out in zip(np_outs, tc_outs, ti_outs):
@@ -245,11 +249,15 @@ def test_utils_geom_taichi_inverse(batch_shape):
 def test_utils_geom_taichi_identity(batch_shape):
     import gstaichi as ti
 
-    for ti_funcs, shape_args in (
-        ((gu.ti_xyz_to_quat, gu.ti_quat_to_xyz), ([3], [4])),
-        ((gu.ti_xyz_to_quat, gu.ti_quat_to_R, gu.ti_R_to_xyz), ([3], [4], [3, 3])),
-        ((gu.ti_xyz_to_quat, gu.ti_quat_to_rotvec, gu.ti_rotvec_to_R, gu.ti_R_to_xyz), ([3], [4], [3], [3, 3])),
-        ((gu.ti_rotvec_to_quat, gu.ti_quat_to_rotvec), ([3], [4])),
+    for ti_funcs, shape_args, funcs_args in (
+        ((gu.ti_xyz_to_quat, gu.ti_quat_to_xyz), ([3], [4]), ((), (gs.EPS,))),
+        ((gu.ti_xyz_to_quat, gu.ti_quat_to_R, gu.ti_R_to_xyz), ([3], [4], [3, 3]), ((), (gs.EPS,), (gs.EPS,))),
+        (
+            (gu.ti_xyz_to_quat, gu.ti_quat_to_rotvec, gu.ti_rotvec_to_R, gu.ti_R_to_xyz),
+            ([3], [4], [3], [3, 3]),
+            ((), (gs.EPS,), (gs.EPS,), (gs.EPS,)),
+        ),
+        ((gu.ti_rotvec_to_quat, gu.ti_quat_to_rotvec), ([3], [4]), ((gs.EPS,), (gs.EPS,))),
     ):
         ti_args = []
         for shape_arg in (*shape_args, shape_args[0]):
@@ -258,9 +266,8 @@ def test_utils_geom_taichi_identity(batch_shape):
             ti_arg.from_numpy(np.random.randn(*batch_shape, *shape_arg).clip(-1.0, 1.0).astype(gs.np_float))
             ti_args.append(ti_arg)
 
-        num_funcs = len(ti_funcs)
-        for i, ti_func in enumerate(ti_funcs):
-            kernel = _ti_kernel_wrapper(ti_func, 1, 1)
+        for i, (ti_func, args) in enumerate(zip(ti_funcs, funcs_args)):
+            kernel = _ti_kernel_wrapper(ti_func, 1, 1, *args)
             kernel(*ti_args[i : (i + 2)])
 
         np.testing.assert_allclose(ti_args[0].to_numpy(), ti_args[-1].to_numpy(), atol=1e2 * gs.EPS)
@@ -285,7 +292,6 @@ def test_utils_geom_tensor_identity(batch_shape):
             np_args.append(np_arg)
             tc_args.append(tc_arg)
 
-        num_funcs = len(py_funcs)
         for i, py_func in enumerate(py_funcs):
             np_args[i + 1][:] = py_func(np_args[i])
             tc_args[i + 1][:] = py_func(tc_args[i])
@@ -358,7 +364,7 @@ def test_pyrender_vec3():
     # repr and tensor conversion
     t = a.as_tensor()
     assert isinstance(t, torch.Tensor)
-    assert_allclose(t.cpu().numpy(), a.v, tol=gs.EPS)
+    assert_allclose(t, a.v, tol=gs.EPS)
 
     # --- Quat tests ---
     q = Quat.from_wxyz(1.0, 0.0, 0.0, 0.0)  # identity
@@ -403,4 +409,60 @@ def test_pyrender_vec3():
     # tensor conversion
     tq = qz.as_tensor()
     assert isinstance(tq, torch.Tensor)
-    assert_allclose(tq.cpu().numpy(), qz.v, tol=gs.EPS)
+    assert_allclose(tq, qz.v, tol=gs.EPS)
+
+
+def test_fps_tracker():
+    n_envs = 23
+    tracker = FPSTracker(alpha=0.0, minimum_interval_seconds=0.1, n_envs=n_envs)
+    tracker.step(current_time=10.0)
+    assert not tracker.step(current_time=10.0)
+    assert not tracker.step(current_time=10.0)
+    assert not tracker.step(current_time=10.0)
+    fps = tracker.step(current_time=10.2)
+    # num envs * [num steps] / (delta time)
+    assert math.isclose(fps, n_envs * 4 / 0.2)
+
+    assert not tracker.step(current_time=10.21)
+    assert not tracker.step(current_time=10.22)
+    assert not tracker.step(current_time=10.29)
+    fps = tracker.step(current_time=10.31)
+    # num envs * [num steps] / (delta time)
+    assert math.isclose(fps, n_envs * 4 / 0.11)
+
+    assert not tracker.step(current_time=10.33)
+    assert not tracker.step(current_time=10.37)
+    assert not tracker.step(current_time=10.39)
+    fps = tracker.step(current_time=10.45)
+    # num envs * [num steps] / (delta time)
+    assert math.isclose(fps, n_envs * 4 / 0.14)
+
+
+@pytest.mark.required
+def test_compose_inertial_properties():
+    """Test composition of inertial properties combining multiple effects."""
+    mass1, com1 = 1.0, np.array([1.0, 0.0, 0.0])
+    inertia1 = np.array([[2.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]])
+
+    mass2, com2 = 2.0, np.array([0.0, 2.0, 0.0])
+    inertia2 = np.array([[1.0, 0.0, 0.0], [0.0, 2.0, 0.0], [0.0, 0.0, 1.0]])
+
+    # Analytical calculations: mass=3.0, COM=[1/3, 4/3, 0]
+    expected_mass, expected_com = 3.0, np.array([1.0 / 3.0, 4.0 / 3.0, 0.0])
+
+    # Translate inertias to combined COM using parallel axis theorem
+    def translate_inertia(I, m, r):  # I + m*(||r||²*I - r⊗r)
+        return I + m * (np.dot(r, r) * np.eye(3) - np.outer(r, r))
+
+    expected_inertia = translate_inertia(inertia1, mass1, expected_com - com1) + translate_inertia(
+        inertia2, mass2, expected_com - com2
+    )
+
+    # Now call the function and verify results
+    combined_mass, combined_com, combined_inertia = compose_inertial_properties(
+        mass1, com1, inertia1, mass2, com2, inertia2
+    )
+
+    assert_allclose(combined_mass, expected_mass, tol=TOL)
+    assert_allclose(combined_com, expected_com, tol=TOL)
+    assert_allclose(combined_inertia, expected_inertia, tol=TOL)

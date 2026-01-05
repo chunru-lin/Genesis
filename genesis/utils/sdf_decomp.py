@@ -8,13 +8,13 @@ import genesis.utils.array_class as array_class
 
 @ti.data_oriented
 class SDF:
-    def __init__(self, rigid_solver):
+    def __init__(self, rigid_solver, is_active: bool = True):
         self.solver = rigid_solver
+        self._is_active = is_active
 
-        n_geoms, n_cells = self.solver.n_geoms, self.solver.n_cells
-        self._sdf_info = array_class.get_sdf_info(n_geoms, n_cells)
+        self._sdf_info = array_class.get_sdf_info(self.solver.n_geoms, self.solver.n_cells)
 
-        if self.solver.n_geoms > 0:
+        if self.solver.n_geoms > 0 and is_active:
             geoms = self.solver.geoms
             sdf_kernel_init_geom_fields(
                 geoms_T_mesh_to_sdf=np.array([geom.T_mesh_to_sdf for geom in geoms], dtype=gs.np_float),
@@ -30,6 +30,10 @@ class SDF:
                 static_rigid_sim_config=self.solver._static_rigid_sim_config,
                 sdf_info=self._sdf_info,
             )
+
+    @property
+    def is_active(self):
+        return self._is_active
 
 
 @ti.kernel
@@ -48,7 +52,7 @@ def sdf_kernel_init_geom_fields(
     n_geoms = sdf_info.geoms_sdf_start.shape[0]
     n_cells = sdf_info.geoms_sdf_val.shape[0]
 
-    ti.loop_config(serialize=ti.static(static_rigid_sim_config.para_level < gs.PARA_LEVEL.PARTIAL))
+    ti.loop_config(serialize=ti.static(static_rigid_sim_config.para_level < gs.PARA_LEVEL.ALL))
     for i in range(n_geoms):
         for j, k in ti.static(ti.ndrange(4, 4)):
             sdf_info.geoms_info.T_mesh_to_sdf[i][j, k] = geoms_T_mesh_to_sdf[i, j, k]
@@ -165,18 +169,21 @@ def sdf_func_ravel_cell_idx(sdf_info: array_class.SDFInfo, cell_idx, sdf_res, ge
 def sdf_func_grad_world(
     geoms_state: array_class.GeomsState,
     geoms_info: array_class.GeomsInfo,
+    rigid_global_info: array_class.RigidGlobalInfo,
     collider_static_config: ti.template(),
     sdf_info: array_class.SDFInfo,
     pos_world,
     geom_idx,
     batch_idx,
 ):
+    EPS = rigid_global_info.EPS[None]
+
     g_pos = geoms_state.pos[geom_idx, batch_idx]
     g_quat = geoms_state.quat[geom_idx, batch_idx]
 
     grad_world = ti.Vector.zero(gs.ti_float, 3)
     if geoms_info.type[geom_idx] == gs.GEOM_TYPE.SPHERE:
-        grad_world = gu.ti_normalize(pos_world - g_pos)
+        grad_world = gu.ti_normalize(pos_world - g_pos, EPS)
 
     elif geoms_info.type[geom_idx] == gs.GEOM_TYPE.PLANE:
         geom_data = geoms_info.data[geom_idx]
@@ -186,7 +193,7 @@ def sdf_func_grad_world(
     else:
         pos_mesh = gu.ti_inv_transform_by_trans_quat(pos_world, g_pos, g_quat)
         pos_sdf = gu.ti_transform_by_T(pos_mesh, sdf_info.geoms_info.T_mesh_to_sdf[geom_idx])
-        grad_sdf = sdf_func_grad(geoms_info, collider_static_config, sdf_info, pos_sdf, geom_idx)
+        grad_sdf = sdf_func_grad(geoms_info, rigid_global_info, collider_static_config, sdf_info, pos_sdf, geom_idx)
 
         grad_mesh = grad_sdf  # no rotation between mesh and sdf frame
         grad_world = gu.ti_transform_by_quat(grad_mesh, g_quat)
@@ -196,6 +203,7 @@ def sdf_func_grad_world(
 @ti.func
 def sdf_func_grad(
     geoms_info: array_class.GeomsInfo,
+    rigid_global_info: array_class.RigidGlobalInfo,
     collider_static_config: ti.template(),
     sdf_info: array_class.SDFInfo,
     pos_sdf,
@@ -207,20 +215,22 @@ def sdf_func_grad(
     """
     grad_sdf = ti.Vector.zero(gs.ti_float, 3)
     if sdf_func_is_outside_sdf_grid(sdf_info, pos_sdf, geom_idx):
-        grad_sdf = sdf_func_proxy_grad(sdf_info, pos_sdf, geom_idx)
+        grad_sdf = sdf_func_proxy_grad(rigid_global_info, sdf_info, pos_sdf, geom_idx)
     else:
         grad_sdf = sdf_func_true_grad(geoms_info, collider_static_config, sdf_info, pos_sdf, geom_idx)
     return grad_sdf
 
 
 @ti.func
-def sdf_func_proxy_grad(sdf_info: array_class.SDFInfo, pos_sdf, geom_idx):
+def sdf_func_proxy_grad(
+    rigid_global_info: array_class.RigidGlobalInfo, sdf_info: array_class.SDFInfo, pos_sdf, geom_idx
+):
     """
     Use direction to sdf center to approximate gradient direction.
     Only considers region outside of cube.
     """
     center = (sdf_info.geoms_info.sdf_res[geom_idx] - 1) / 2.0
-    proxy_sdf_grad = gu.ti_normalize(pos_sdf - center)
+    proxy_sdf_grad = gu.ti_normalize(pos_sdf - center, rigid_global_info.EPS[None])
     return proxy_sdf_grad
 
 
@@ -269,6 +279,7 @@ def sdf_func_true_grad(
 def sdf_func_normal_world(
     geoms_state: array_class.GeomsState,
     geoms_info: array_class.GeomsInfo,
+    rigid_global_info: array_class.RigidGlobalInfo,
     collider_static_config: ti.template(),
     sdf_info: array_class.SDFInfo,
     pos_world,
@@ -276,7 +287,10 @@ def sdf_func_normal_world(
     batch_idx,
 ):
     return gu.ti_normalize(
-        sdf_func_grad_world(geoms_state, geoms_info, collider_static_config, sdf_info, pos_world, geom_idx, batch_idx)
+        sdf_func_grad_world(
+            geoms_state, geoms_info, rigid_global_info, collider_static_config, sdf_info, pos_world, geom_idx, batch_idx
+        ),
+        rigid_global_info.EPS[None],
     )
 
 

@@ -1,4 +1,5 @@
 import os
+import platform
 import sys
 
 import numpy as np
@@ -7,11 +8,16 @@ import trimesh
 
 import genesis as gs
 import genesis.utils.gltf as gltf_utils
-import genesis.utils.usda as usda_utils
 import genesis.utils.mesh as mesh_utils
 
 from .utils import assert_allclose, assert_array_equal, get_hf_dataset
 
+try:
+    import genesis.utils.usda as usda_utils
+
+    HAS_USD_SUPPORT = True
+except ImportError:
+    HAS_USD_SUPPORT = False
 
 VERTICES_TOL = 1e-05  # Transformation loses a little precision in vertices
 NORMALS_TOL = 1e-02  # Conversion from .usd to .glb loses a little precision in normals
@@ -251,6 +257,7 @@ def test_glb_parse_material(glb_file):
 
 
 @pytest.mark.required
+@pytest.mark.skipif(not HAS_USD_SUPPORT, reason="'usd-core' module not found.")
 @pytest.mark.parametrize("usd_filename", ["usd/sneaker_airforce", "usd/RoughnessTest"])
 def test_usd_parse(usd_filename):
     asset_path = get_hf_dataset(pattern=f"{usd_filename}.glb")
@@ -300,6 +307,7 @@ def test_usd_parse(usd_filename):
 
 
 @pytest.mark.required
+@pytest.mark.skipif(not HAS_USD_SUPPORT, reason="'usd-core' module not found.")
 @pytest.mark.parametrize("usd_file", ["usd/nodegraph.usda"])
 def test_usd_parse_nodegraph(usd_file):
     asset_path = get_hf_dataset(pattern=usd_file)
@@ -371,9 +379,15 @@ def test_urdf_with_existing_glb(tmp_path, show_viewer):
         show_viewer=show_viewer,
         show_FPS=False,
     )
-    robot_urdf = scene.add_entity(
+    robot_urdf_yup = scene.add_entity(
         gs.morphs.URDF(
             file=urdf_path,
+        ),
+    )
+    robot_urdf_zup = scene.add_entity(
+        gs.morphs.URDF(
+            file=urdf_path,
+            parse_glb_with_zup=True,
         ),
     )
     robot_mesh = scene.add_entity(
@@ -382,7 +396,9 @@ def test_urdf_with_existing_glb(tmp_path, show_viewer):
             parse_glb_with_zup=True,
         ),
     )
-    check_gs_meshes(robot_urdf.vgeoms[0].vmesh, robot_mesh.vgeoms[0].vmesh, "robot")
+    check_gs_meshes(robot_urdf_zup.vgeoms[0].vmesh, robot_mesh.vgeoms[0].vmesh, "robot")
+    robot_urdf_yup.vgeoms[0].vmesh.convert_to_zup()
+    check_gs_meshes(robot_urdf_yup.vgeoms[0].vmesh, robot_mesh.vgeoms[0].vmesh, "robot")
 
 
 @pytest.mark.required
@@ -496,6 +512,7 @@ def test_2_channels_luminance_alpha_textures(show_viewer):
 
 
 @pytest.mark.required
+@pytest.mark.skipif(platform.machine() == "aarch64", reason="Module 'tetgen' is crashing on Linux ARM.")
 def test_splashsurf_surface_reconstruction(show_viewer):
     scene = gs.Scene(
         show_viewer=show_viewer,
@@ -520,7 +537,8 @@ def test_splashsurf_surface_reconstruction(show_viewer):
     cam.render(rgb=True, depth=False, segmentation=False, colorize_seg=False, normal=False)
 
 
-@pytest.mark.required
+# FIXME: This test is taking too much time on some platform (~1200s)
+# @pytest.mark.required
 def test_convex_decompose_cache(monkeypatch):
     # Check if the convex decomposition cache is correctly tracked regardless of the scale
 
@@ -551,7 +569,7 @@ def test_convex_decompose_cache(monkeypatch):
         show_viewer=False,
     )
     first_scale = 2.0
-    duck = scene.add_entity(
+    scene.add_entity(
         morph=gs.morphs.Mesh(
             file="meshes/duck.obj",
             scale=first_scale,
@@ -566,7 +584,7 @@ def test_convex_decompose_cache(monkeypatch):
         show_viewer=False,
     )
     second_scale = 4.0
-    duck = scene.add_entity(
+    scene.add_entity(
         morph=gs.morphs.Mesh(
             file="meshes/duck.obj",
             scale=second_scale,

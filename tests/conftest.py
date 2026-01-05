@@ -1,6 +1,7 @@
 import base64
 import ctypes
 import gc
+import logging
 import os
 import re
 import subprocess
@@ -15,7 +16,6 @@ import pytest
 from _pytest.mark import Expression, MarkMatcher
 from PIL import Image
 from syrupy.extensions.image import PNGImageSnapshotExtension
-from syrupy.location import PyTestLocation
 
 has_display = True
 try:
@@ -66,9 +66,12 @@ def pytest_make_parametrize_id(config, val, argname):
 
 @pytest.hookimpl
 def pytest_cmdline_main(config: pytest.Config) -> None:
-    # Force disabling forked for non-linux systems
-    if not sys.platform.startswith("linux"):
-        config.option.forked = False
+    # Make sure that no unsupported markers have been specified in CLI
+    declared_markers = set(name for spec in config.getini("markers") if (name := spec.split(":")[0]) != "forked")
+    try:
+        eval(config.option.markexpr, {"__builtins__": {}}, {key: None for key in declared_markers})
+    except NameError as e:
+        raise pytest.UsageError(f"Unknown marker in CLI expression: '{e.name}'")
 
     # Make sure that benchmarks are running on GPU and the number of workers if valid
     expr = Expression.compile(config.option.markexpr)
@@ -79,6 +82,10 @@ def pytest_cmdline_main(config: pytest.Config) -> None:
         if backend == "cpu":
             raise ValueError("Running benchmarks on CPU is not supported.")
         config.option.backend = "gpu"
+
+    # Force disabling forked for non-linux systems
+    if not sys.platform.startswith("linux"):
+        config.option.forked = False
 
     # Force disabling distributed framework if interactive viewer is enabled
     show_viewer = config.getoption("--vis")
@@ -107,6 +114,10 @@ def pytest_cmdline_main(config: pytest.Config) -> None:
     # relying on this mechanism is fragile.
     os.environ.setdefault("TI_ENABLE_PYBUF", "0" if sys.stdout is sys.__stdout__ else "1")
 
+    # Disable GsTaichi dynamic array mode by default on MacOS because it is not supported by Metal
+    if sys.platform == "darwin":
+        os.environ.setdefault("GS_ENABLE_NDARRAY", "0")
+
     # Enforce special environment variable before importing test modules if distributed framework is enabled
     worker_id = os.environ.get("PYTEST_XDIST_WORKER")
     if worker_id and worker_id.startswith("gw"):
@@ -118,9 +129,13 @@ def pytest_cmdline_main(config: pytest.Config) -> None:
         os.environ["TI_VISIBLE_DEVICE"] = str(gpu_index)
 
         # Limit CPU threading
-        physical_core_count = psutil.cpu_count(logical=config.option.logical)
-        num_workers = int(os.environ["PYTEST_XDIST_WORKER_COUNT"])
-        num_cpu_per_worker = str(max(int(physical_core_count / num_workers), 1))
+        if is_benchmarks:
+            # FIXME: Enabling multi-threading in benchmark is making compile time estimation unreliable
+            num_cpu_per_worker = "1"
+        else:
+            physical_core_count = psutil.cpu_count(logical=config.option.logical)
+            num_workers = int(os.environ["PYTEST_XDIST_WORKER_COUNT"])
+            num_cpu_per_worker = str(max(int(physical_core_count / num_workers), 1))
         os.environ["TI_NUM_THREADS"] = num_cpu_per_worker
         os.environ["OMP_NUM_THREADS"] = num_cpu_per_worker
         os.environ["OPENBLAS_NUM_THREADS"] = num_cpu_per_worker
@@ -294,6 +309,25 @@ def pytest_xdist_auto_num_workers(config):
     return int(num_workers)
 
 
+@pytest.hookimpl(trylast=True)
+def pytest_collection_modifyitems(config, items):
+    # Run slow tests first
+
+    slow = [item for item in items if "slow" in item.keywords]
+    fast = [item for item in items if "slow" not in item.keywords]
+
+    max_workers = config.option.numprocesses
+    if max_workers is None:
+        max_workers = int(os.environ["PYTEST_XDIST_WORKER_COUNT"])
+    max_workers = max(max_workers, 1)
+
+    buckets = [[] for _ in range(max_workers)]
+    for idx, item in enumerate(slow + fast):
+        bucket_idx = idx % max_workers
+        buckets[bucket_idx].append(item)
+    items[:] = [item for bucket in sorted(buckets, key=len) for item in bucket]
+
+
 def pytest_runtest_setup(item):
     # Match CUDA device with EGL device.
     # Note that this must be done here instead of 'pytest_cmdline_main', otherwise it will segfault when using
@@ -463,8 +497,21 @@ def performance_mode(request):
     return performance_mode
 
 
+@pytest.fixture
+def debug(request):
+    debug = None
+    for mark in request.node.iter_markers("debug"):
+        if mark.args:
+            if debug is not None:
+                pytest.fail("'debug' can only be specified once.")
+            (debug,) = mark.args
+    return debug
+
+
 @pytest.fixture(scope="function", autouse=True)
-def initialize_genesis(request, monkeypatch, tmp_path, backend, precision, performance_mode, taichi_offline_cache):
+def initialize_genesis(
+    request, monkeypatch, tmp_path, backend, precision, performance_mode, debug, taichi_offline_cache
+):
     import genesis as gs
 
     # Early return if backend is None
@@ -472,13 +519,15 @@ def initialize_genesis(request, monkeypatch, tmp_path, backend, precision, perfo
         yield
         return
 
-    logging_level = request.config.getoption("--log-cli-level")
-    debug = request.config.getoption("--dev")
+    logging_level = request.config.getoption("--log-cli-level", logging.INFO)
+    if debug is None:
+        debug = request.config.getoption("--dev")
 
     if not taichi_offline_cache:
         monkeypatch.setenv("TI_OFFLINE_CACHE", "0")
         # FIXME: Must set temporary cache even if caching is forcibly disabled because this flag is not always honored
-        monkeypatch.setenv("TI_OFFLINE_CACHE_FILE_PATH", str(tmp_path / ".cache"))
+        monkeypatch.setenv("TI_OFFLINE_CACHE_FILE_PATH", str(tmp_path / ".cache" / "taichi"))
+        monkeypatch.setenv("GS_CACHE_FILE_PATH", str(tmp_path / ".cache" / "genesis"))
         monkeypatch.setenv("GS_ENABLE_FASTCACHE", "0")
 
     # Redirect name terrain cache directory to some test-local temporary location to avoid conflict and persistence
@@ -517,12 +566,6 @@ def initialize_genesis(request, monkeypatch, tmp_path, backend, precision, perfo
 
         if backend != gs.cpu and gs.backend == gs.cpu:
             pytest.skip("No GPU available on this machine")
-
-        # Skip test if gstaichi ndarray mode is enabled but not supported by this specific test
-        if gs.use_ndarray:
-            for mark in request.node.iter_markers("field_only"):
-                if not mark.args or mark.args[0]:
-                    pytest.skip("This test does not support GsTaichi dynamic array mode. Skipping...")
 
         yield
     finally:
@@ -637,6 +680,10 @@ class PixelMatchSnapshotExtension(PNGImageSnapshotExtension):
             buffer.write(data)
             buffer.seek(0)
             img_arrays.append(np.atleast_3d(np.asarray(Image.open(buffer))).astype(np.int32))
+
+        if img_arrays[0].shape != img_arrays[1].shape:
+            return False
+
         img_delta = np.minimum(np.abs(img_arrays[1] - img_arrays[0]), 255).astype(np.uint8)
         if (
             np.max(np.std(img_delta.reshape((-1, img_delta.shape[-1])), axis=0)) > self._std_err_threshold

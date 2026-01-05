@@ -182,14 +182,10 @@ class MPMSolver(Solver):
         self._coupler = self.sim._coupler
 
         if self.is_active:
-            if self._enable_CPIC:
-                gs.logger.warning(
-                    "Kernel compilation takes longer when running MPM solver in CPIC mode. Please be patient."
+            if self._enable_CPIC and self._sim.requires_grad:
+                gs.raise_exception(
+                    "CPIC is not supported in differentiable mode yet. Submit a feature request if you need it."
                 )
-                if self._sim.requires_grad:
-                    gs.raise_exception(
-                        "CPIC is not supported in differentiable mode yet. Submit a feature request if you need it."
-                    )
 
             self.init_particle_fields()
             self.init_grid_fields()
@@ -369,6 +365,7 @@ class MPMSolver(Solver):
                                 sdf_normal_cell = sdf_decomp.sdf_func_normal_world(
                                     geoms_state=geoms_state,
                                     geoms_info=geoms_info,
+                                    rigid_global_info=rigid_global_info,
                                     collider_static_config=collider_static_config,
                                     sdf_info=sdf_info,
                                     pos_world=cell_pos,
@@ -442,7 +439,6 @@ class MPMSolver(Solver):
                 self.particles[f + 1, i_p, i_b].vel = new_vel
                 self.particles[f + 1, i_p, i_b].C = new_C
                 self.particles[f + 1, i_p, i_b].pos = new_pos
-
             else:
                 self.particles[f + 1, i_p, i_b].vel = self.particles[f, i_p, i_b].vel
                 self.particles[f + 1, i_p, i_b].pos = self.particles[f, i_p, i_b].pos
@@ -451,6 +447,14 @@ class MPMSolver(Solver):
                 self.particles[f + 1, i_p, i_b].Jp = self.particles[f, i_p, i_b].Jp
 
             self.particles_ng[f + 1, i_p, i_b].active = self.particles_ng[f, i_p, i_b].active
+
+    @ti.kernel
+    def _is_state_valid(self, f: ti.i32) -> ti.i32:
+        is_success = True
+        for i_p, i_b, i_3 in ti.ndrange(self._n_particles, self._B, 3):
+            if ti.math.isnan(self.particles[f, i_p, i_b].pos[i_3]):
+                is_success = False
+        return is_success
 
     # ------------------------------------------------------------------------------------
     # ------------------------------------ stepping --------------------------------------
@@ -498,6 +502,11 @@ class MPMSolver(Solver):
             self.sim.coupler.rigid_solver.links_state,
             self.sim.coupler.rigid_solver._rigid_global_info,
         )
+        # FIXME: Use existing errno mechanism for this.
+        if not self._is_state_valid(f):
+            gs.raise_exception(
+                "NaN detected in MPM states. Try reducing the time step size or adjusting simulation parameters."
+            )
 
     def substep_post_coupling_grad(self, f):
         self.g2p.grad(

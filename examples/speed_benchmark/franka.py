@@ -3,7 +3,7 @@ import torch
 import genesis as gs
 
 ########################## init ##########################
-gs.init(backend=gs.gpu)
+gs.init(backend=gs.gpu, performance_mode=True)
 
 ########################## create a scene ##########################
 scene = gs.Scene(
@@ -38,7 +38,7 @@ scene.build(n_envs=B, env_spacing=(1.0, 1.0))
 # with the following control: 43M FPS
 # without the following control (arm in collision with the floor): 32M FPS
 franka.control_dofs_position(
-    torch.tile(torch.tensor([0, 0, 0, -1.0, 0, 0, 0, 0.02, 0.02], device=gs.device), (B, 1)),
+    torch.tile(torch.tensor([0, 0, 0, -1.0, 0, 1.0, 0, 0.02, 0.02], device=gs.device), (B, 1)),
 )
 
 for i in range(1000):
